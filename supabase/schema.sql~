@@ -1,0 +1,246 @@
+-- ================================================
+-- PaperTalks Database Schema
+-- ================================================
+-- Run this in your Supabase SQL Editor to set up the database.
+
+-- ------------------------------------------------
+-- PROFILES TABLE
+-- ------------------------------------------------
+-- Extends Supabase auth.users with researcher profile data
+
+CREATE TABLE IF NOT EXISTS public.profiles (
+  id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  email TEXT NOT NULL,
+  name TEXT,
+  orcid_id TEXT UNIQUE,
+  institution TEXT,
+  department TEXT,
+  bio TEXT,
+  avatar_url TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Enable RLS
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+
+-- Policies
+CREATE POLICY "Public profiles are viewable by everyone"
+  ON public.profiles FOR SELECT
+  USING (true);
+
+CREATE POLICY "Users can update own profile"
+  ON public.profiles FOR UPDATE
+  USING (auth.uid() = id);
+
+CREATE POLICY "Users can insert own profile"
+  ON public.profiles FOR INSERT
+  WITH CHECK (auth.uid() = id);
+
+-- ------------------------------------------------
+-- PAPERS TABLE
+-- ------------------------------------------------
+-- Research publications linked to researchers
+
+CREATE TABLE IF NOT EXISTS public.papers (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  doi TEXT UNIQUE,
+  title TEXT NOT NULL,
+  abstract TEXT,
+  authors JSONB,
+  published_date DATE,
+  journal TEXT,
+  url TEXT,
+  researcher_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Enable RLS
+ALTER TABLE public.papers ENABLE ROW LEVEL SECURITY;
+
+-- Policies
+CREATE POLICY "Published papers are viewable by everyone"
+  ON public.papers FOR SELECT
+  USING (true);
+
+CREATE POLICY "Users can manage own papers"
+  ON public.papers FOR ALL
+  USING (auth.uid() = researcher_id);
+
+-- ------------------------------------------------
+-- VIDEOS TABLE
+-- ------------------------------------------------
+-- Video explainers for papers
+
+CREATE TYPE video_status AS ENUM ('draft', 'processing', 'published', 'unlisted', 'archived');
+
+CREATE TABLE IF NOT EXISTS public.videos (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  vri TEXT UNIQUE NOT NULL,
+  paper_id UUID REFERENCES public.papers(id) ON DELETE SET NULL,
+  researcher_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  description TEXT,
+  video_url TEXT,
+  thumbnail_url TEXT,
+  duration INTEGER,
+  status video_status DEFAULT 'draft',
+  published_at TIMESTAMPTZ,
+  view_count INTEGER DEFAULT 0,
+  completion_rate REAL DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Enable RLS
+ALTER TABLE public.videos ENABLE ROW LEVEL SECURITY;
+
+-- Policies
+CREATE POLICY "Published videos are viewable by everyone"
+  ON public.videos FOR SELECT
+  USING (status = 'published' OR auth.uid() = researcher_id);
+
+CREATE POLICY "Users can manage own videos"
+  ON public.videos FOR ALL
+  USING (auth.uid() = researcher_id);
+
+-- ------------------------------------------------
+-- TEACHING SCORES TABLE
+-- ------------------------------------------------
+-- Aggregated teaching metrics per researcher
+
+CREATE TABLE IF NOT EXISTS public.teaching_scores (
+  researcher_id UUID PRIMARY KEY REFERENCES public.profiles(id) ON DELETE CASCADE,
+  overall_score REAL DEFAULT 0,
+  clarity_score REAL DEFAULT 0,
+  engagement_score REAL DEFAULT 0,
+  peer_rating_score REAL DEFAULT 0,
+  accessibility_score REAL DEFAULT 0,
+  video_count INTEGER DEFAULT 0,
+  total_views INTEGER DEFAULT 0,
+  last_updated TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Enable RLS
+ALTER TABLE public.teaching_scores ENABLE ROW LEVEL SECURITY;
+
+-- Policies
+CREATE POLICY "Teaching scores are viewable by everyone"
+  ON public.teaching_scores FOR SELECT
+  USING (true);
+
+CREATE POLICY "System can update teaching scores"
+  ON public.teaching_scores FOR ALL
+  USING (auth.uid() = researcher_id);
+
+-- ------------------------------------------------
+-- EARLY ACCESS SIGNUPS TABLE
+-- ------------------------------------------------
+-- Waitlist for early access
+
+CREATE TABLE IF NOT EXISTS public.early_access_signups (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email TEXT UNIQUE NOT NULL,
+  role TEXT,
+  institution TEXT,
+  signed_up_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Enable RLS
+ALTER TABLE public.early_access_signups ENABLE ROW LEVEL SECURITY;
+
+-- Policies (only authenticated users with admin role can read)
+CREATE POLICY "Early access signups are insertable by anyone"
+  ON public.early_access_signups FOR INSERT
+  WITH CHECK (true);
+
+-- ------------------------------------------------
+-- VIDEO ANALYTICS TABLE
+-- ------------------------------------------------
+-- Event tracking for videos
+
+CREATE TABLE IF NOT EXISTS public.video_analytics (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  video_id UUID NOT NULL REFERENCES public.videos(id) ON DELETE CASCADE,
+  event_type TEXT NOT NULL,
+  viewer_id UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
+  timestamp TIMESTAMPTZ DEFAULT NOW(),
+  metadata JSONB
+);
+
+-- Enable RLS
+ALTER TABLE public.video_analytics ENABLE ROW LEVEL SECURITY;
+
+-- Policies
+CREATE POLICY "Analytics are insertable by anyone"
+  ON public.video_analytics FOR INSERT
+  WITH CHECK (true);
+
+CREATE POLICY "Users can view own video analytics"
+  ON public.video_analytics FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM public.videos
+      WHERE videos.id = video_analytics.video_id
+      AND videos.researcher_id = auth.uid()
+    )
+  );
+
+-- ------------------------------------------------
+-- FUNCTIONS
+-- ------------------------------------------------
+
+-- Auto-create profile on user signup
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, name, avatar_url)
+  VALUES (
+    NEW.id,
+    NEW.email,
+    COALESCE(NEW.raw_user_meta_data->>'name', NEW.raw_user_meta_data->>'full_name'),
+    NEW.raw_user_meta_data->>'avatar_url'
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Trigger for auto-creating profile
+CREATE OR REPLACE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- Update updated_at timestamp
+CREATE OR REPLACE FUNCTION public.update_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Triggers for updated_at
+CREATE TRIGGER update_profiles_updated_at
+  BEFORE UPDATE ON public.profiles
+  FOR EACH ROW EXECUTE FUNCTION public.update_updated_at();
+
+CREATE TRIGGER update_papers_updated_at
+  BEFORE UPDATE ON public.papers
+  FOR EACH ROW EXECUTE FUNCTION public.update_updated_at();
+
+CREATE TRIGGER update_videos_updated_at
+  BEFORE UPDATE ON public.videos
+  FOR EACH ROW EXECUTE FUNCTION public.update_updated_at();
+
+-- ------------------------------------------------
+-- INDEXES
+-- ------------------------------------------------
+
+CREATE INDEX IF NOT EXISTS idx_papers_researcher_id ON public.papers(researcher_id);
+CREATE INDEX IF NOT EXISTS idx_videos_researcher_id ON public.videos(researcher_id);
+CREATE INDEX IF NOT EXISTS idx_videos_paper_id ON public.videos(paper_id);
+CREATE INDEX IF NOT EXISTS idx_videos_status ON public.videos(status);
+CREATE INDEX IF NOT EXISTS idx_video_analytics_video_id ON public.video_analytics(video_id);
+CREATE INDEX IF NOT EXISTS idx_early_access_email ON public.early_access_signups(email);
+
