@@ -119,12 +119,15 @@ export async function signInWithOrcid() {
   });
 
   if (error) {
-    return { error: error.message };
+    redirect(`/login?error=${encodeURIComponent(error.message)}`);
   }
 
   if (data.url) {
     redirect(data.url);
   }
+
+  // Fallback redirect if no URL
+  redirect('/login?error=oauth_failed');
 }
 
 /**
@@ -141,12 +144,15 @@ export async function signInWithGoogle() {
   });
 
   if (error) {
-    return { error: error.message };
+    redirect(`/login?error=${encodeURIComponent(error.message)}`);
   }
 
   if (data.url) {
     redirect(data.url);
   }
+
+  // Fallback redirect if no URL
+  redirect('/login?error=oauth_failed');
 }
 
 /**

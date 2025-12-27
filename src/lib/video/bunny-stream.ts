@@ -92,7 +92,7 @@ export async function uploadVideo(videoId: string, videoBuffer: Buffer): Promise
       'AccessKey': BUNNY_API_KEY,
       'Content-Type': 'application/octet-stream',
     },
-    body: videoBuffer,
+    body: videoBuffer as unknown as BodyInit,
   });
 
   if (!response.ok) {
